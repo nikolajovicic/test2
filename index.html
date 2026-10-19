@@ -80,12 +80,29 @@
   input[type=range] { width: 90px; accent-color: var(--brass); }
   .spacer { flex: 1 1 auto; }
 
+  /* Scroll strip – drag along it to move the whole keyboard */
+  #strip {
+    flex: 0 0 5mm; position: relative;
+    background:
+      repeating-linear-gradient(90deg, transparent 0 7px, rgba(255,255,255,.05) 7px 8px),
+      var(--panel);
+    border-bottom: 1px solid var(--panel-edge);
+    touch-action: none; cursor: grab;
+  }
+  #strip.drag { cursor: grabbing; background-color: var(--panel-edge); }
+  #thumb {
+    position: absolute; top: 35%; height: 30%;
+    border-radius: 999px; background: var(--brass); opacity: .75;
+    pointer-events: none;
+  }
+
   /* Keyboard */
   #board {
-    flex: 1 1 auto; position: relative;
+    flex: 1 1 auto; position: relative; overflow: hidden;
     background:
       radial-gradient(ellipse at 50% 0%, #2c2a25 0%, var(--bg) 70%);
   }
+  #keys { position: absolute; left: 0; top: 0; will-change: transform; }
   .key {
     position: absolute;
     border-radius: 50%;
@@ -95,22 +112,19 @@
     transition: transform 40ms, background-color 40ms;
     box-shadow: inset 0 -3px 0 rgba(0,0,0,.25), 0 2px 2px rgba(0,0,0,.45);
   }
-  .key.w { background: var(--white-key); color: var(--white-key-ink); border: 1px solid var(--white-key-edge); }
-  .key.b { background: var(--black-key); color: var(--black-key-ink); border: 1px solid var(--black-key-edge); }
+  .key.w { background: radial-gradient(circle at 35% 30%, #fffaf0, var(--white-key) 55%, #ddd2bb); color: var(--white-key-ink); border: 1px solid var(--white-key-edge); }
+  .key.b { background: radial-gradient(circle at 35% 30%, #3b3732, var(--black-key) 60%); color: var(--black-key-ink); border: 1px solid var(--black-key-edge); }
+  /* C buttons carry a ridged marker so you can find them by eye, like on a real treble keyboard */
+  .key.mark::before {
+    content: ''; position: absolute; inset: 20%; border-radius: 50%;
+    background:
+      repeating-linear-gradient(45deg, rgba(0,0,0,.13) 0 1px, transparent 1px 6px),
+      repeating-linear-gradient(-45deg, rgba(0,0,0,.13) 0 1px, transparent 1px 6px);
+  }
   .key.down { background: var(--pressed) !important; color: #1b1a18 !important; transform: scale(.93); box-shadow: inset 0 2px 3px rgba(0,0,0,.4); }
-  .key .n { display: none; }
+  .key .n { display: none; position: relative; }
   #board.names .key .n { display: block; }
   .key .n small { font-weight: 400; opacity: .6; font-size: .75em; }
-  .rowtag { position: absolute; color: var(--ink-dim); font-size: 11px; }
-
-  #hint {
-    position: absolute; inset: 0; display: none;
-    align-items: center; justify-content: center; text-align: center;
-    background: rgba(27,26,24,.92); color: var(--ink); padding: 24px; z-index: 5;
-  }
-  @media (orientation: portrait) { #hint { display: flex; } }
-  #hint p { max-width: 26ch; font-size: 17px; }
-  #hint button { margin-top: 10px; }
 </style>
 </head>
 <body>
@@ -133,13 +147,8 @@
   <span class="spacer"></span>
   <input type="range" id="vol" min="0" max="1" step="0.01" value="0.7" title="Jačina">
 </div>
-<div id="board"></div>
-<div id="hint">
-  <div>
-    <p>Okreni telefon vodoravno — raspored je pravljen za landscape.</p>
-    <button class="ctl" id="hintClose">Svejedno nastavi</button>
-  </div>
-</div>
+<div id="strip" title="Prevuci da pomeriš klavijaturu"><div id="thumb"></div></div>
+<div id="board"><div id="keys"></div></div>
 
 <script>
 (() => {
@@ -149,7 +158,7 @@
   // Semitone of button (row r, column i) = base + 3*i + r.
   // Row 0 starts on H, row 1 on C, row 2 on Cis; rows 3 and 4 duplicate rows 0 and 1.
   const ROWS = 5;
-  const COLS = 16;
+  const COLS = 18;
   const BASE_MIDI = 47;               // H2
   const NAMES = ['C','Cis','D','Es','E','F','Fis','G','As','A','B','H'];
   const BLACK = new Set([1,3,6,8,10]);
@@ -163,7 +172,14 @@
   let volume = 0.7;
 
   const board = document.getElementById('board');
+  const keysEl = document.getElementById('keys');
+  const strip = document.getElementById('strip');
+  const thumb = document.getElementById('thumb');
   const keyEls = [];        // index k = r*COLS + i
+
+  // Scrolling along the keyboard: vertical in portrait, horizontal in landscape
+  let vertical = false;
+  let scroll = 0, maxScroll = 0, alongLen = 0, viewLen = 0;
 
   function semitoneOf(r, i) { return BASE_MIDI + 3*i + r + 12*octaveShift; }
   function midiToHz(m) { return 440 * Math.pow(2, (m - 69) / 12); }
@@ -174,7 +190,7 @@
   }
 
   function buildKeys() {
-    board.innerHTML = '';
+    keysEl.innerHTML = '';
     keyEls.length = 0;
     for (let r = 0; r < ROWS; r++) {
       for (let i = 0; i < COLS; i++) {
@@ -182,7 +198,7 @@
         el.className = 'key';
         el.dataset.r = r; el.dataset.i = i;
         el.innerHTML = '<span class="n"></span>';
-        board.appendChild(el);
+        keysEl.appendChild(el);
         keyEls.push(el);
       }
     }
@@ -191,28 +207,46 @@
 
   function layout() {
     const W = board.clientWidth, H = board.clientHeight;
-    const pad = 10;
-    // horizontal pitch p; rows are offset by p/3 and stacked at 0.943p so diagonal neighbours touch
+    const pad = 8;
+    // The 5 rows fill the short side; the keyboard runs along the long side and scrolls.
+    // pitch p along the keyboard; rows are offset by p/3 and stacked at 0.943p so diagonal neighbours touch
     const DY = 0.943;
-    const pByW = (W - 2*pad) / (COLS + (ROWS - 1) / 3);
-    const pByH = (H - 2*pad) / ((ROWS - 1) * DY + 1);
-    const p = Math.min(pByW, pByH);
-    const d = p * 0.86;  // button diameter
-    const totalW = p * (COLS + (ROWS - 1) / 3);
-    const totalH = p * ((ROWS - 1) * DY + 1);
-    const x0 = (W - totalW) / 2, y0 = (H - totalH) / 2;
+    vertical = H > W;
+    const across = vertical ? W : H;
+    viewLen = vertical ? H : W;
+    const p = (across - 2*pad) / ((ROWS - 1) * DY + 1);
+    const d = p * 0.92;  // button diameter
+    const acrossLen = p * ((ROWS - 1) * DY + 1);
+    alongLen = p * (COLS + (ROWS - 1) / 3) + 2*pad;
+    const v0 = (across - acrossLen) / 2;
+    const u0 = pad + Math.max(0, (viewLen - alongLen) / 2);
 
     for (const el of keyEls) {
       const r = +el.dataset.r, i = +el.dataset.i;
       const vr = flipped ? (ROWS - 1 - r) : r;         // visual row
-      const cx = x0 + p * (i + r/3) + p/2;
-      const cy = y0 + p * (vr * DY) + p/2;
+      const u = u0 + p * (i + r/3) + p/2;              // along the keyboard (low notes first)
+      const v = v0 + p * (vr * DY) + p/2;              // across the rows
+      el.cx = vertical ? v : u;
+      el.cy = vertical ? u : v;
+      el.rad = d / 2;
       el.style.width = el.style.height = d + 'px';
-      el.style.left = (cx - d/2) + 'px';
-      el.style.top = (cy - d/2) + 'px';
-      el.style.fontSize = Math.max(9, d * 0.34) + 'px';
+      el.style.left = (el.cx - d/2) + 'px';
+      el.style.top = (el.cy - d/2) + 'px';
+      el.style.fontSize = Math.max(9, d * 0.3) + 'px';
       refreshKey(el);
     }
+    maxScroll = Math.max(0, alongLen - viewLen);
+    setScroll(scroll);
+  }
+
+  function setScroll(s) {
+    scroll = Math.max(0, Math.min(maxScroll, s));
+    keysEl.style.transform = vertical
+      ? `translate3d(0, ${-scroll}px, 0)` : `translate3d(${-scroll}px, 0, 0)`;
+    const frac = alongLen > 0 ? Math.min(1, viewLen / alongLen) : 1;
+    const w = Math.max(10, frac * 100);
+    thumb.style.width = w + '%';
+    thumb.style.left = (maxScroll ? scroll / maxScroll : 0) * (100 - w) + '%';
   }
 
   function refreshKey(el) {
@@ -220,6 +254,7 @@
     const pc = ((m % 12) + 12) % 12;
     el.classList.toggle('b', BLACK.has(pc));
     el.classList.toggle('w', !BLACK.has(pc));
+    el.classList.toggle('mark', pc === 0);
     el.querySelector('.n').innerHTML = labelFor(m);
     el.dataset.midi = m;
   }
@@ -301,12 +336,13 @@
   const pointers = new Map();
 
   function keyAt(x, y) {
+    // board coordinates -> keyboard coordinates
+    if (vertical) y += scroll; else x += scroll;
     // circles: find nearest key whose centre is within radius
     let best = null, bestD = Infinity;
     for (const el of keyEls) {
-      const r = el.offsetWidth / 2;
-      const cx = el.offsetLeft + r, cy = el.offsetTop + r;
-      const dx = x - cx, dy = y - cy, d2 = dx*dx + dy*dy;
+      const r = el.rad;
+      const dx = x - el.cx, dy = y - el.cy, d2 = dx*dx + dy*dy;
       if (d2 <= r*r*1.15 && d2 < bestD) { bestD = d2; best = el; }
     }
     return best;
@@ -356,6 +392,39 @@
   board.addEventListener('pointercancel', up);
   board.addEventListener('lostpointercapture', up);
   board.addEventListener('contextmenu', e => e.preventDefault());
+  board.addEventListener('wheel', e => {
+    e.preventDefault();
+    setScroll(scroll + e.deltaY + e.deltaX);
+  }, { passive: false });
+
+  // ---------- Scroll strip: drag to move the keyboard with the finger ----------
+  let stripDrag = null;     // {id, x, y}
+  strip.addEventListener('pointerdown', e => {
+    e.preventDefault();
+    strip.setPointerCapture?.(e.pointerId);
+    stripDrag = { id: e.pointerId, x: e.clientX, y: e.clientY };
+    strip.classList.add('drag');
+  });
+  strip.addEventListener('pointermove', e => {
+    if (!stripDrag || e.pointerId !== stripDrag.id) return;
+    const dx = e.clientX - stripDrag.x, dy = e.clientY - stripDrag.y;
+    stripDrag.x = e.clientX; stripDrag.y = e.clientY;
+    const along = vertical ? dy : dx, perp = vertical ? dx : dy;
+    // Moving along the keyboard drags it 1:1. In portrait a sideways swipe along the
+    // strip works too: one full swipe across the strip covers the whole keyboard.
+    const delta = Math.abs(along) >= Math.abs(perp)
+      ? along : perp * Math.max(1, maxScroll / Math.max(1, strip.clientWidth));
+    setScroll(scroll - delta);
+  });
+  function stripUp(e) {
+    if (!stripDrag || e.pointerId !== stripDrag.id) return;
+    stripDrag = null;
+    strip.classList.remove('drag');
+  }
+  strip.addEventListener('pointerup', stripUp);
+  strip.addEventListener('pointercancel', stripUp);
+  strip.addEventListener('lostpointercapture', stripUp);
+  strip.addEventListener('contextmenu', e => e.preventDefault());
 
   // ---------- Controls ----------
   document.querySelectorAll('.reg').forEach(b => b.addEventListener('click', () => {
@@ -385,12 +454,8 @@
     try {
       if (!document.fullscreenElement) {
         await document.documentElement.requestFullscreen();
-        await screen.orientation?.lock?.('landscape').catch(() => {});
       } else await document.exitFullscreen();
     } catch (_) {}
-  });
-  document.getElementById('hintClose').addEventListener('click', () => {
-    document.getElementById('hint').style.display = 'none';
   });
 
   // Unlock audio as early as possible on first interaction
